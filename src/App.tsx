@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import Papa from 'papaparse'
-import { Line, Bar } from 'react-chartjs-2'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Bar } from 'react-chartjs-2'
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -13,19 +12,113 @@ import {
   Legend,
   Filler,
 } from 'chart.js'
-import { AlertCircle, Loader2 } from 'lucide-react'
+import { AlertCircle, Loader2, ChevronLeft, ChevronRight, X, Info } from 'lucide-react'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, Filler)
 
-type RawRow = {
-  user_id?: string
-  device_Id?: string
-  con_status?: string | boolean
-  con_link?: string
-  conn_sts_time?: string | number
-  createdAt?: string
-  updatedAt?: string
-  serial_no?: string
+const API_BASE = 'https://ftp.iinvsys.com:55576/core1/spl'
+
+// API Response types
+type SerialSearchResponse = {
+  status: string
+  page: number
+  limit: number
+  total: number
+  total_pages: number
+  data: { serial_no: string; device_id: string }[]
+}
+
+type ConnectionDataResponse = {
+  status: string
+  message: string
+  data: {
+    user_id: string | null
+    con_status: boolean
+    con_link: number | null
+    conn_sts_time: number
+    _id: string
+    device_Id: string
+    createdAt: string
+    updatedAt: string
+  }[]
+  count: number
+}
+
+type SerialItem = {
+  serial_no: string
+  device_id: string
+}
+
+type DeviceSwitch = {
+  switch_id: string
+  switch_name: string
+  switch_type: string
+  switch_image: string
+  enrg_id: string
+  src_name: boolean
+  timer_dur: number
+  set_timer: boolean
+}
+
+type AssociatedUser = {
+  _id: string
+  username: string
+  user_role: string
+}
+
+type DeviceDetails = {
+  location_id: string
+  node_type: string
+  entry_flg: boolean
+  cur_firm_vrs: string
+  hw_vrs: string
+  svr_ota: boolean
+  token: string
+  secondAdmin: string
+  BLE_mac: string
+  router_ssid: string
+  router_mac: string
+  brand_name: string
+  model_name: string
+  capacity: number | null
+  auto_onoff_enable: boolean
+  sch_ovr_auto_onoff: boolean
+  high_temp_thrs: number
+  low_temp_thrs: number
+  cold_power_on_cnt: number
+  recvr_reset_cnt: number
+  app_svr_con_cnt: number
+  svr_con_count: number
+  tot_svr_con_on_dur: number
+  tot_app_svr_device_on_dur: number
+  tot_app_svr_con_on_dur: number
+  dev_app_last_discon_time: string | null
+  dev_svr_last_discon_time: string | null
+  skt_session_cnt: number
+  log_print_cnt: number
+  tot_energy_consume: number | null
+  active_pwr_accum_val: number | null
+  idle_pwr_accum_val: number | null
+  build_number: number
+  avg_rssi: number | null
+  dev_con_cnt: number
+  conn_status: string
+  region: string
+  timezone: string
+  periodic_on_off: boolean
+  _id: string
+  serial_no: string
+  switches: DeviceSwitch[]
+  createdAt: string
+  updatedAt: string
+  latitude: number
+  longitude: number
+}
+
+type DeviceInfoResponse = {
+  status: string
+  device_details: DeviceDetails
+  associated_users: AssociatedUser[]
 }
 
 type ConnectionRecord = {
@@ -33,71 +126,55 @@ type ConnectionRecord = {
   deviceId: string
   status: 'connected' | 'disconnected'
   timestamp: Date
-  rawTime?: number
+  rawTime: number
   createdAt?: Date
   updatedAt?: Date
 }
-
-const CSV_URL = '/connection_sorted.csv'
 const RANGE_OPTIONS = [
-  { value: 'all', label: 'All time' },
+  { value: 'today', label: 'This day' },
+  { value: 'yesterday', label: 'Previous day' },
+  { value: '24h', label: 'Last 24 hours' },
   { value: '7d', label: 'Last 7 days' },
-  { value: '30d', label: 'Last 30 days' },
-  { value: '90d', label: 'Last 90 days' },
-  { value: '180d', label: 'Last 180 days' },
+  { value: 'custom', label: 'Custom' },
 ] as const
 type RangeValue = (typeof RANGE_OPTIONS)[number]['value']
 
-function parseDate(raw: string | number | undefined): Date | undefined {
-  if (raw === undefined || raw === null) return undefined
-  // Prefer ISO date strings if valid
-  if (typeof raw === 'string') {
-    const iso = new Date(raw)
-    if (!Number.isNaN(iso.getTime())) return iso
-    const asNumber = Number(raw)
-    if (!Number.isNaN(asNumber)) return parseDate(asNumber)
-    return undefined
+const TIMEZONE_OPTIONS = [
+  { value: 'UTC', label: 'UTC' },
+  { value: 'Asia/Dubai', label: 'UAE (UTC+4)' },
+  { value: 'Asia/Kolkata', label: 'India (UTC+5:30)' },
+] as const
+type TimezoneValue = (typeof TIMEZONE_OPTIONS)[number]['value']
+
+// Helper to calculate epoch range based on selected time range
+function getEpochRange(range: RangeValue, dateFrom: string, dateTo: string): { fromEpoch: number; toEpoch: number } {
+  const now = new Date()
+  const toEpoch = Math.floor(now.getTime() / 1000)
+  let fromEpoch: number
+
+  if (range === 'custom') {
+    fromEpoch = dateFrom ? Math.floor(new Date(dateFrom).getTime() / 1000) : toEpoch - 7 * 24 * 60 * 60
+    const customTo = dateTo ? Math.floor(new Date(dateTo).getTime() / 1000) : toEpoch
+    return { fromEpoch, toEpoch: customTo }
   }
-  // numeric timestamp: interpret as seconds if looks like epoch seconds
-  const num = Number(raw)
-  if (Number.isNaN(num)) return undefined
-  if (num > 1e12) return new Date(num) // already ms
-  if (num > 1e9) return new Date(num * 1000) // seconds
-  return undefined
-}
 
-function cleanDeviceId(raw?: string) {
-  if (!raw) return ''
-  const match = raw.match(/ObjectId\((.*?)\)/)
-  if (match && match[1]) return match[1]
-  return raw.trim()
-}
-
-function normalizeRow(row: RawRow): ConnectionRecord | null {
-  const serial = row.serial_no?.trim()
-  if (!serial) return null
-  const deviceId = cleanDeviceId(row.device_Id)
-  const statusBool =
-    typeof row.con_status === 'boolean'
-      ? row.con_status
-      : String(row.con_status).toLowerCase().trim() === 'true'
-  const status: ConnectionRecord['status'] = statusBool ? 'connected' : 'disconnected'
-  const primaryDate = parseDate(row.conn_sts_time)
-  const createdDate = parseDate(row.createdAt)
-  const updatedDate = parseDate(row.updatedAt)
-
-  const timestamp = primaryDate ?? updatedDate ?? createdDate
-  if (!timestamp) return null
-
-  return {
-    serial,
-    deviceId,
-    status,
-    timestamp,
-    rawTime: typeof row.conn_sts_time === 'number' ? row.conn_sts_time : Number(row.conn_sts_time),
-    createdAt: createdDate,
-    updatedAt: updatedDate,
+  if (range === 'today') {
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    fromEpoch = Math.floor(todayStart.getTime() / 1000)
+  } else if (range === 'yesterday') {
+    const yesterdayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    fromEpoch = Math.floor(yesterdayStart.getTime() / 1000)
+    return { fromEpoch, toEpoch: Math.floor(todayStart.getTime() / 1000) }
+  } else if (range === '24h') {
+    fromEpoch = toEpoch - 24 * 60 * 60
+  } else if (range === '7d') {
+    fromEpoch = toEpoch - 7 * 24 * 60 * 60
+  } else {
+    fromEpoch = toEpoch - 24 * 60 * 60
   }
+
+  return { fromEpoch, toEpoch }
 }
 
 type Summary = {
@@ -209,189 +286,175 @@ function computeSummary(records: ConnectionRecord[]): Summary {
 }
 
 export default function App() {
-  const [records, setRecords] = useState<ConnectionRecord[]>([])
+  // Serial list state (from API)
+  const [serialList, setSerialList] = useState<SerialItem[]>([])
+  const [serialPage, setSerialPage] = useState(1)
+  const [serialTotalPages, setSerialTotalPages] = useState(1)
+  const [serialTotal, setSerialTotal] = useState(0)
+  const [serialLoading, setSerialLoading] = useState(true)
+  
+  // Selected device state
   const [selectedSerial, setSelectedSerial] = useState<string>('')
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('')
+  
+  // Connection records state (from API)
+  const [records, setRecords] = useState<ConnectionRecord[]>([])
+  const [recordsLoading, setRecordsLoading] = useState(false)
+  
+  // Filter state
   const [search, setSearch] = useState('')
-  const [range, setRange] = useState<RangeValue>('all')
+  const [searchDebounced, setSearchDebounced] = useState('')
+  const [range, setRange] = useState<RangeValue>('7d')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
-  const [loading, setLoading] = useState(true)
+  
+  // UI state
   const [error, setError] = useState<string | null>(null)
   const [durationUnit, setDurationUnit] = useState<'seconds' | 'minutes' | 'hours'>('minutes')
+  const [timezone, setTimezone] = useState<TimezoneValue>('UTC')
+  
+  // Device details modal state
+  const [showDeviceModal, setShowDeviceModal] = useState(false)
+  const [deviceDetails, setDeviceDetails] = useState<DeviceDetails | null>(null)
+  const [associatedUsers, setAssociatedUsers] = useState<AssociatedUser[]>([])
+  const [deviceDetailsLoading, setDeviceDetailsLoading] = useState(false)
 
-  useEffect(() => {
-    setLoading(true)
-    Papa.parse<RawRow>(CSV_URL, {
-      download: true,
-      header: true,
-      skipEmptyLines: true,
-      complete: (results) => {
-        const cleaned: ConnectionRecord[] = []
-        for (const row of results.data) {
-          const normalized = normalizeRow(row)
-          if (normalized) cleaned.push(normalized)
-        }
-        cleaned.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
-        setRecords(cleaned)
-        if (cleaned.length > 0) {
-          setSelectedSerial(cleaned[0].serial)
-        }
-        setLoading(false)
-      },
-      error: (err) => {
-        setError(err.message)
-        setLoading(false)
-      },
-    })
-  }, [])
-
-  const serialList = useMemo(() => {
-    const map = new Map<string, { count: number; connected: number; disconnected: number }>()
-    records.forEach((r) => {
-      const entry = map.get(r.serial) ?? { count: 0, connected: 0, disconnected: 0 }
-      entry.count += 1
-      if (r.status === 'connected') entry.connected += 1
-      else entry.disconnected += 1
-      map.set(r.serial, entry)
-    })
-    return Array.from(map.entries())
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([serial, stats]) => ({ serial, ...stats }))
-  }, [records])
-
-  const filteredBySerial = useMemo(
-    () => records.filter((r) => r.serial === selectedSerial),
-    [records, selectedSerial],
+  const dateFormatter = useMemo(
+    () =>
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }),
+    [timezone],
   )
 
-  const filtered = useMemo(() => {
-    let current = filteredBySerial
+  const formatInTimezone = useCallback(
+    (d?: Date) => {
+      if (!d) return '—'
+      return dateFormatter.format(d)
+    },
+    [dateFormatter],
+  )
 
-    const fromMs = dateFrom ? new Date(dateFrom).getTime() : null
-    const toMs = dateTo ? new Date(dateTo).getTime() : null
+  // Debounce search input
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSearchDebounced(search)
+      setSerialPage(1) // Reset to page 1 on new search
+    }, 400)
+    return () => clearTimeout(timer)
+  }, [search])
 
-    if (fromMs && !Number.isNaN(fromMs)) {
-      current = current.filter((r) => r.timestamp.getTime() >= fromMs)
+  // Fetch serial numbers from API
+  useEffect(() => {
+    const fetchSerials = async () => {
+      setSerialLoading(true)
+      setError(null)
+      try {
+        const searchParam = searchDebounced || 'SPL'
+        const url = `${API_BASE}/devices/search_serialno?search=${encodeURIComponent(searchParam)}&page=${serialPage}&limit=20`
+        const res = await fetch(url)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data: SerialSearchResponse = await res.json()
+        setSerialList(data.data)
+        setSerialTotalPages(data.total_pages)
+        setSerialTotal(data.total)
+        
+        // Auto-select first serial if none selected
+        if (!selectedSerial && data.data.length > 0) {
+          setSelectedSerial(data.data[0].serial_no)
+          setSelectedDeviceId(data.data[0].device_id)
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to fetch serial numbers')
+      } finally {
+        setSerialLoading(false)
+      }
     }
-    if (toMs && !Number.isNaN(toMs)) {
-      current = current.filter((r) => r.timestamp.getTime() <= toMs)
+    fetchSerials()
+  }, [searchDebounced, serialPage])
+
+  // Fetch connection data when device or range changes
+  useEffect(() => {
+    if (!selectedDeviceId) {
+      setRecords([])
+      return
     }
 
-    if (range === 'all' || current.length === 0) return current
-
-    const end = current[current.length - 1].timestamp.getTime()
-    const rangeMap: Record<RangeValue, number> = {
-      all: Number.POSITIVE_INFINITY,
-      '7d': 7,
-      '30d': 30,
-      '90d': 90,
-      '180d': 180,
+    const fetchConnectionData = async () => {
+      setRecordsLoading(true)
+      try {
+        const { fromEpoch, toEpoch } = getEpochRange(range, dateFrom, dateTo)
+        const res = await fetch(`${API_BASE}/device_Maintainance/get_deviceConnection_data`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            device_Id: selectedDeviceId,
+            fromEpoch,
+            toEpoch,
+          }),
+        })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data: ConnectionDataResponse = await res.json()
+        
+        const parsed: ConnectionRecord[] = data.data.map((item) => ({
+          serial: selectedSerial,
+          deviceId: item.device_Id,
+          status: item.con_status ? 'connected' : 'disconnected',
+          timestamp: new Date(item.conn_sts_time * 1000),
+          rawTime: item.conn_sts_time,
+          createdAt: new Date(item.createdAt),
+          updatedAt: new Date(item.updatedAt),
+        }))
+        
+        // Sort by timestamp ascending
+        parsed.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+        setRecords(parsed)
+      } catch (err) {
+        console.error('Failed to fetch connection data:', err)
+        setRecords([])
+      } finally {
+        setRecordsLoading(false)
+      }
     }
-    const startMs = end - rangeMap[range] * 24 * 60 * 60 * 1000
-    return current.filter((r) => r.timestamp.getTime() >= startMs)
-  }, [filteredBySerial, range, dateFrom, dateTo])
+    fetchConnectionData()
+  }, [selectedDeviceId, selectedSerial, range, dateFrom, dateTo])
+
+  // Handle serial selection
+  const handleSelectSerial = (serial: string, deviceId: string) => {
+    setSelectedSerial(serial)
+    setSelectedDeviceId(deviceId)
+  }
+
+  // Fetch device details for modal
+  const fetchDeviceDetails = async (serialNo: string) => {
+    setDeviceDetailsLoading(true)
+    setShowDeviceModal(true)
+    setDeviceDetails(null)
+    setAssociatedUsers([])
+    
+    try {
+      const res = await fetch(`${API_BASE}/devices/deviceinfo?serial_no=${encodeURIComponent(serialNo)}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data: DeviceInfoResponse = await res.json()
+      setDeviceDetails(data.device_details)
+      setAssociatedUsers(data.associated_users || [])
+    } catch (err) {
+      console.error('Failed to fetch device details:', err)
+    } finally {
+      setDeviceDetailsLoading(false)
+    }
+  }
+
+  // The filtered records are now directly from API (already filtered by range via epoch)
+  const filtered = records
 
   const summary = useMemo(() => computeSummary(filtered), [filtered])
-
-  const chartData = useMemo(() => {
-    const labels = filtered.map((r) => r.timestamp.toLocaleString())
-    const dataPoints = filtered.map((r) => (r.status === 'connected' ? 1 : 0))
-    return {
-      labels,
-      datasets: [
-        {
-          label: 'Connection status (1 = connected, 0 = disconnected)',
-          data: dataPoints,
-          borderColor: 'rgb(59, 130, 246)',
-          backgroundColor: 'rgba(59, 130, 246, 0.15)',
-          fill: true,
-          stepped: 'before' as const, // Square wave: step happens at the point
-          tension: 0,
-          pointRadius: 4,
-          pointHoverRadius: 6,
-          borderWidth: 2,
-        },
-      ],
-    }
-  }, [filtered])
-
-  const chartOptions = useMemo(
-    () => ({
-      responsive: true,
-      maintainAspectRatio: false,
-      scales: {
-        y: {
-          beginAtZero: true,
-          min: -0.05,
-          max: 1.05,
-          ticks: {
-            stepSize: 1,
-            callback: (value: number | string) =>
-              Number(value) >= 1 ? 'Connected' : Number(value) <= 0 ? 'Disconnected' : '',
-          },
-        },
-      },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: (ctx: any) => {
-              const idx = ctx.dataIndex
-              const current = filtered[idx]
-              const prev = filtered[idx - 1]
-              const status = ctx.raw === 1 ? 'Connected (ON)' : 'Disconnected (OFF)'
-              const timeStr = current?.timestamp.toLocaleString()
-
-              let durationStr = ''
-              
-              if (prev) {
-                const currentState = current.status
-                const prevState = prev.status
-                
-                if (prevState !== currentState) {
-                  // TRANSITION: Show how long it was in the PREVIOUS state
-                  // Find when the previous state started
-                  const prevOpposite = prevState === 'connected' ? 'disconnected' : 'connected'
-                  let prevStateStartIdx = -1
-                  for (let i = idx - 2; i >= 0; i--) {
-                    if (filtered[i].status === prevOpposite) {
-                      prevStateStartIdx = i
-                      break
-                    }
-                  }
-                  const startTime = prevStateStartIdx >= 0 
-                    ? filtered[prevStateStartIdx].timestamp.getTime()
-                    : prev.timestamp.getTime()
-                  const diff = current.timestamp.getTime() - startTime
-                  const label = prevState === 'connected' ? 'ON' : 'OFF'
-                  durationStr = ` | Was ${label} for: ${formatDuration(diff)}`
-                } else {
-                  // CONTINUATION: Show cumulative duration of CURRENT state
-                  // Find the last opposite state event (when this state started)
-                  const oppositeState = currentState === 'connected' ? 'disconnected' : 'connected'
-                  let stateStartIdx = -1
-                  for (let i = idx - 1; i >= 0; i--) {
-                    if (filtered[i].status === oppositeState) {
-                      stateStartIdx = i
-                      break
-                    }
-                  }
-                  if (stateStartIdx >= 0) {
-                    const diff = current.timestamp.getTime() - filtered[stateStartIdx].timestamp.getTime()
-                    const label = currentState === 'connected' ? 'ON' : 'OFF'
-                    durationStr = ` | ${label} for: ${formatDuration(diff)}`
-                  }
-                }
-              }
-
-              return `${status} @ ${timeStr}${durationStr}`
-            },
-          },
-        },
-      },
-    }),
-    [filtered],
-  )
 
   // Duration chart: shows duration of each state period in configurable time units
   const durationChartData = useMemo(() => {
@@ -408,7 +471,7 @@ export default function App() {
         const endTime = current.status !== periodStart.status ? current.timestamp : current.timestamp
         const durationMs = endTime.getTime() - periodStart.timestamp.getTime()
         periods.push({
-          label: periodStart.timestamp.toLocaleString(),
+          label: formatInTimezone(periodStart.timestamp),
           duration: durationMs / divisor,
           state: periodStart.status,
         })
@@ -437,7 +500,7 @@ export default function App() {
         },
       ],
     }
-  }, [filtered, durationUnit])
+  }, [filtered, durationUnit, formatInTimezone])
 
   const durationChartOptions = useMemo(
     () => ({
@@ -472,7 +535,7 @@ export default function App() {
     [durationUnit],
   )
 
-  const formatDate = (d?: Date) => (d ? d.toLocaleString() : '—')
+  const formatDate = (d?: Date) => formatInTimezone(d)
   const formatDuration = (ms?: number) => {
     if (ms === undefined) return '—'
     if (ms < 60_000) return `${Math.round(ms / 1000)} sec`
@@ -488,17 +551,9 @@ export default function App() {
             Device connectivity by serial number
           </h1>
           <p className="text-sm text-slate-600">
-            Browse serial numbers, view connection timelines, and see quick uptime summaries. Data is loaded
-            from <code className="rounded bg-slate-200 px-1 py-0.5 text-xs">connection_sorted.csv</code>.
+            Browse serial numbers, view connection timelines, and see quick uptime summaries.
           </p>
         </header>
-
-        {loading && (
-          <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
-            <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
-            <span className="text-sm text-slate-700">Loading CSV data…</span>
-          </div>
-        )}
 
         {error && (
           <div className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800">
@@ -510,76 +565,92 @@ export default function App() {
           </div>
         )}
 
-        {!loading && !error && (
-          <>
-            <div className="grid gap-4 md:grid-cols-4">
-              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Total events</p>
-                <p className="mt-2 text-2xl font-semibold text-slate-900">{records.length}</p>
-                <p className="text-xs text-slate-500">Across {serialList.length} serial numbers</p>
+        <>
+          <div className="grid gap-4 md:grid-cols-4">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Total events</p>
+              <p className="mt-2 text-2xl font-semibold text-slate-900">{records.length}</p>
+              <p className="text-xs text-slate-500">{serialTotal} serial numbers found</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Connected</p>
+              <p className="mt-2 text-2xl font-semibold text-emerald-600">{summary.connected}</p>
+              <p className="text-xs text-slate-500">Events marked connected</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Disconnected</p>
+              <p className="mt-2 text-2xl font-semibold text-rose-600">{summary.disconnected}</p>
+              <p className="text-xs text-slate-500">Events marked disconnected</p>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <p className="text-xs uppercase tracking-wide text-slate-500">Uptime %</p>
+              <p className="mt-2 text-2xl font-semibold text-blue-600">
+                {summary.uptimePct.toFixed(1)}
+                <span className="text-sm text-slate-500">%</span>
+              </p>
+              <p className="text-xs text-slate-500">Connected / total</p>
+            </div>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-[280px,1fr] lg:items-stretch">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm h-full flex flex-col">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-slate-800">Serial numbers</p>
+                <span className="text-xs text-slate-500">{serialTotal} total</span>
               </div>
-              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Connected</p>
-                <p className="mt-2 text-2xl font-semibold text-emerald-600">{summary.connected}</p>
-                <p className="text-xs text-slate-500">Events marked connected</p>
+              <div className="mt-3">
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search serial…"
+                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 outline-none ring-0 transition focus:border-blue-400 focus:shadow-sm"
+                />
               </div>
-              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Disconnected</p>
-                <p className="mt-2 text-2xl font-semibold text-rose-600">{summary.disconnected}</p>
-                <p className="text-xs text-slate-500">Events marked disconnected</p>
+              <div className="mt-3 flex-1 min-h-0 relative">
+                {serialLoading ? (
+                  <div className="flex items-center justify-center h-20">
+                    <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+                  </div>
+                ) : (
+                  <div className="absolute inset-0 overflow-y-auto pr-1 space-y-2">
+                    {serialList.map((s) => (
+                      <button
+                        key={s.device_id}
+                        onClick={() => handleSelectSerial(s.serial_no, s.device_id)}
+                        className={`w-full rounded-lg border px-3 py-2 text-left transition hover:border-blue-200 hover:bg-blue-50 ${
+                          selectedSerial === s.serial_no
+                            ? 'border-blue-500 bg-blue-50 text-blue-700 shadow-sm'
+                            : 'border-slate-200 bg-white text-slate-700'
+                        }`}
+                      >
+                        <span className="text-sm font-medium">{s.serial_no}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
-              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                <p className="text-xs uppercase tracking-wide text-slate-500">Uptime %</p>
-                <p className="mt-2 text-2xl font-semibold text-blue-600">
-                  {summary.uptimePct.toFixed(1)}
-                  <span className="text-sm text-slate-500">%</span>
-                </p>
-                <p className="text-xs text-slate-500">Connected / total</p>
+              {/* Pagination */}
+              <div className="mt-3 flex items-center justify-between border-t border-slate-100 pt-3">
+                <button
+                  onClick={() => setSerialPage((p) => Math.max(1, p - 1))}
+                  disabled={serialPage <= 1}
+                  className="flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <ChevronLeft className="h-3 w-3" /> Prev
+                </button>
+                <span className="text-xs text-slate-500">
+                  Page {serialPage} of {serialTotalPages}
+                </span>
+                <button
+                  onClick={() => setSerialPage((p) => Math.min(serialTotalPages, p + 1))}
+                  disabled={serialPage >= serialTotalPages}
+                  className="flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Next <ChevronRight className="h-3 w-3" />
+                </button>
               </div>
             </div>
-
-            <div className="grid gap-6 lg:grid-cols-[280px,1fr] lg:items-stretch">
-              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm h-full flex flex-col">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-slate-800">Serial numbers</p>
-                  <span className="text-xs text-slate-500">{serialList.length} total</span>
-                </div>
-                <div className="mt-3">
-                  <input
-                    type="text"
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search serial…"
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 outline-none ring-0 transition focus:border-blue-400 focus:shadow-sm"
-                  />
-                </div>
-                <div className="mt-3 flex-1 min-h-0 relative">
-                  <div className="absolute inset-0 overflow-y-auto pr-1 space-y-2">
-                    {serialList
-                      .filter((s) => s.serial.toLowerCase().includes(search.toLowerCase()))
-                      .map((s) => (
-                        <button
-                          key={s.serial}
-                          onClick={() => setSelectedSerial(s.serial)}
-                          className={`w-full rounded-lg border px-3 py-2 text-left transition hover:border-blue-200 hover:bg-blue-50 ${
-                            selectedSerial === s.serial
-                              ? 'border-blue-500 bg-blue-50 text-blue-700 shadow-sm'
-                              : 'border-slate-200 bg-white text-slate-700'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm font-medium">{s.serial}</span>
-                            <span className="text-[11px] font-semibold text-slate-500">{s.count} evt</span>
-                          </div>
-                          <div className="mt-1 flex items-center gap-2 text-[11px] text-slate-500">
-                            <span className="text-emerald-600">● {s.connected}</span>
-                            <span className="text-rose-600">● {s.disconnected}</span>
-                          </div>
-                        </button>
-                      ))}
-                  </div>
-                </div>
-              </div>
 
               <div className="space-y-4 flex flex-col h-full">
                   <div className="flex flex-wrap items-center gap-3">
@@ -589,6 +660,15 @@ export default function App() {
                         {selectedSerial || 'None selected'}
                     </p>
                   </div>
+                  {selectedSerial && (
+                    <button
+                      onClick={() => fetchDeviceDetails(selectedSerial)}
+                      className="flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 transition hover:bg-blue-100"
+                    >
+                      <Info className="h-3.5 w-3.5" />
+                      Device Details
+                    </button>
+                  )}
                   <div className="flex items-center gap-2 text-xs text-slate-600">
                     <span>First seen:</span>
                     <span className="font-medium text-slate-800">{formatDate(summary.firstSeen)}</span>
@@ -623,7 +703,7 @@ export default function App() {
                     <p className="mt-1 text-lg font-semibold text-emerald-600">{formatDuration(summary.longestOn?.durationMs)}</p>
                     <p className="text-[11px] text-slate-500">
                       {summary.longestOn
-                        ? `${summary.longestOn.start.toLocaleString()} → ${summary.longestOn.end.toLocaleString()}`
+                        ? `${formatInTimezone(summary.longestOn.start)} → ${formatInTimezone(summary.longestOn.end)}`
                         : '—'}
                     </p>
                   </div>
@@ -634,7 +714,7 @@ export default function App() {
                     </p>
                     <p className="text-[11px] text-slate-500">
                       {summary.longestOff
-                        ? `${summary.longestOff.start.toLocaleString()} → ${summary.longestOff.end.toLocaleString()}`
+                        ? `${formatInTimezone(summary.longestOff.start)} → ${formatInTimezone(summary.longestOff.end)}`
                         : '—'}
                     </p>
                   </div>
@@ -647,7 +727,7 @@ export default function App() {
                     <div className="space-y-1">
                       <p className="text-sm font-semibold text-slate-800">State duration chart</p>
                       <p className="text-xs text-slate-500">
-                        Duration of each ON/OFF period
+                        Duration of each ON/OFF period • {filtered.length} events
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -667,78 +747,80 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                  <div className="mt-4 h-[320px]">
-                    {durationChartData.labels.length > 0 ? (
-                      <Bar data={durationChartData} options={durationChartOptions} />
-                    ) : (
-                      <div className="flex h-full items-center justify-center text-sm text-slate-500">
-                        Not enough data to show duration chart.
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="space-y-1">
-                      <p className="text-sm font-semibold text-slate-800">Connection status timeline</p>
-                      <p className="text-xs text-slate-500">
-                        {filtered.length > 0 ? `${filtered.length} points` : 'No data'}
-                      </p>
-                    </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-3">
                     <div className="flex flex-wrap gap-2">
-                      {RANGE_OPTIONS.map((opt) => (
-                        <button
-                          key={opt.value}
-                          onClick={() => setRange(opt.value)}
-                          className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                            range === opt.value
-                              ? 'border-blue-500 bg-blue-50 text-blue-700 shadow-sm'
-                              : 'border-slate-200 bg-white text-slate-600 hover:border-blue-200 hover:bg-blue-50'
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
+                      <select
+                        value={range}
+                        onChange={(e) => setRange(e.target.value as RangeValue)}
+                        className="rounded-md border border-slate-200 px-2 py-1.5 text-xs text-slate-700 outline-none focus:border-blue-400"
+                      >
+                        {RANGE_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                     <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
                       <label className="flex items-center gap-1">
-                        <span>From</span>
-                        <input
-                          type="datetime-local"
-                          value={dateFrom}
-                          onChange={(e) => setDateFrom(e.target.value)}
-                          className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-400"
-                        />
-                      </label>
-                      <label className="flex items-center gap-1">
-                        <span>To</span>
-                        <input
-                          type="datetime-local"
-                          value={dateTo}
-                          onChange={(e) => setDateTo(e.target.value)}
-                          className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-400"
-                        />
-                      </label>
-                      {(dateFrom || dateTo) && (
-                        <button
-                          onClick={() => {
-                            setDateFrom('')
-                            setDateTo('')
-                          }}
-                          className="rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-slate-600 hover:border-blue-200 hover:bg-blue-50"
+                        <span>Timezone</span>
+                        <select
+                          value={timezone}
+                          onChange={(e) => setTimezone(e.target.value as TimezoneValue)}
+                          className="rounded-md border border-slate-200 px-2 py-1.5 text-xs text-slate-700 outline-none focus:border-blue-400"
                         >
-                          Clear dates
-                        </button>
+                          {TIMEZONE_OPTIONS.map((tz) => (
+                            <option key={tz.value} value={tz.value}>
+                              {tz.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {range === 'custom' && (
+                        <>
+                          <label className="flex items-center gap-1">
+                            <span>From</span>
+                            <input
+                              type="datetime-local"
+                              value={dateFrom}
+                              onChange={(e) => setDateFrom(e.target.value)}
+                              className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-400"
+                            />
+                          </label>
+                          <label className="flex items-center gap-1">
+                            <span>To</span>
+                            <input
+                              type="datetime-local"
+                              value={dateTo}
+                              onChange={(e) => setDateTo(e.target.value)}
+                              className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-400"
+                            />
+                          </label>
+                          {(dateFrom || dateTo) && (
+                            <button
+                              onClick={() => {
+                                setDateFrom('')
+                                setDateTo('')
+                              }}
+                              className="rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-slate-600 hover:border-blue-200 hover:bg-blue-50"
+                            >
+                              Clear
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
                   </div>
                   <div className="mt-4 h-[320px]">
-                    {filtered.length > 0 ? (
-                      <Line data={chartData} options={chartOptions} />
+                    {recordsLoading ? (
+                      <div className="flex h-full items-center justify-center">
+                        <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
+                      </div>
+                    ) : durationChartData.labels.length > 0 ? (
+                      <Bar data={durationChartData} options={durationChartOptions} />
                     ) : (
                       <div className="flex h-full items-center justify-center text-sm text-slate-500">
-                        Select a serial to view its connection history.
+                        {selectedSerial ? 'No data for selected range.' : 'Select a serial to view data.'}
                       </div>
                     )}
                   </div>
@@ -747,6 +829,196 @@ export default function App() {
               </div>
             </div>
           </>
+
+        {/* Device Details Modal */}
+        {showDeviceModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+            <div className="relative max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-xl bg-white shadow-xl">
+              {/* Modal Header */}
+              <div className="sticky top-0 flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
+                <h2 className="text-lg font-semibold text-slate-900">
+                  Device Details: {deviceDetails?.serial_no || selectedSerial}
+                </h2>
+                <button
+                  onClick={() => setShowDeviceModal(false)}
+                  className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              {/* Modal Content */}
+              <div className="p-6">
+                {deviceDetailsLoading ? (
+                  <div className="flex items-center justify-center py-12">
+                    <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+                  </div>
+                ) : deviceDetails ? (
+                  <div className="space-y-6">
+                    {/* Basic Info */}
+                    <div>
+                      <h3 className="mb-3 text-sm font-semibold text-slate-800">Basic Information</h3>
+                      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Serial No</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.serial_no}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Firmware</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">v{deviceDetails.cur_firm_vrs}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Hardware</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">v{deviceDetails.hw_vrs}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Build Number</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.build_number}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Region</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.region || '—'}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Timezone</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.timezone || '—'}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Network Info */}
+                    <div>
+                      <h3 className="mb-3 text-sm font-semibold text-slate-800">Network</h3>
+                      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">BLE MAC</p>
+                          <p className="mt-1 text-sm font-mono font-medium text-slate-900">{deviceDetails.BLE_mac || '—'}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Router SSID</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.router_ssid || '—'}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Router MAC</p>
+                          <p className="mt-1 text-sm font-mono font-medium text-slate-900">{deviceDetails.router_mac || '—'}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Conn Status</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.conn_status}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Avg RSSI</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.avg_rssi ?? '—'}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Connection Count</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.dev_con_cnt}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Counters */}
+                    <div>
+                      <h3 className="mb-3 text-sm font-semibold text-slate-800">Counters & Statistics</h3>
+                      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Cold Power On</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.cold_power_on_cnt}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Receiver Reset</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.recvr_reset_cnt}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Server Conn</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.svr_con_count}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">App Server Conn</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.app_svr_con_cnt}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Settings */}
+                    <div>
+                      <h3 className="mb-3 text-sm font-semibold text-slate-800">Settings</h3>
+                      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">High Temp</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.high_temp_thrs}°C</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Low Temp</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.low_temp_thrs}°C</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Auto On/Off</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.auto_onoff_enable ? 'Yes' : 'No'}</p>
+                        </div>
+                        <div className="rounded-lg bg-slate-50 p-3">
+                          <p className="text-[11px] uppercase tracking-wide text-slate-500">Server OTA</p>
+                          <p className="mt-1 text-sm font-medium text-slate-900">{deviceDetails.svr_ota ? 'Yes' : 'No'}</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Switches */}
+                    {deviceDetails.switches && deviceDetails.switches.length > 0 && (
+                      <div>
+                        <h3 className="mb-3 text-sm font-semibold text-slate-800">Switches</h3>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {deviceDetails.switches.map((sw) => (
+                            <div key={sw.switch_id} className="rounded-lg border border-slate-200 bg-white p-3">
+                              <div className="flex items-center justify-between">
+                                <span className="text-sm font-medium text-slate-900">{sw.switch_name}</span>
+                                <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">
+                                  {sw.switch_type}
+                                </span>
+                              </div>
+                              <p className="mt-1 text-[11px] text-slate-500">ID: {sw.switch_id}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Associated Users */}
+                    {associatedUsers.length > 0 && (
+                      <div>
+                        <h3 className="mb-3 text-sm font-semibold text-slate-800">Associated Users</h3>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {associatedUsers.map((user) => (
+                            <div key={user._id} className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3">
+                              <span className="text-sm font-medium text-slate-900">{user.username}</span>
+                              <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
+                                {user.user_role}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Timestamps */}
+                    <div className="border-t border-slate-100 pt-4">
+                      <div className="flex flex-wrap gap-4 text-xs text-slate-500">
+                        <span>Created: {new Date(deviceDetails.createdAt).toLocaleString()}</span>
+                        <span>Updated: {new Date(deviceDetails.updatedAt).toLocaleString()}</span>
+                        {deviceDetails.latitude && deviceDetails.longitude && (
+                          <span>Location: {deviceDetails.latitude.toFixed(4)}, {deviceDetails.longitude.toFixed(4)}</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="py-12 text-center text-sm text-slate-500">
+                    Failed to load device details.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>
