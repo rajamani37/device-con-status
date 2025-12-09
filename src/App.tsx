@@ -64,6 +64,10 @@ type AssociatedUser = {
   _id: string
   username: string
   user_role: string
+  is_email_verified?: boolean
+  is_mobile_verified?: boolean
+  dob?: string | null
+  gender?: string | null
 }
 
 type DeviceDetails = {
@@ -92,8 +96,8 @@ type DeviceDetails = {
   tot_svr_con_on_dur: number
   tot_app_svr_device_on_dur: number
   tot_app_svr_con_on_dur: number
-  dev_app_last_discon_time: string | null
-  dev_svr_last_discon_time: string | null
+  dev_app_last_discon_time: string | number | null
+  dev_svr_last_discon_time: string | number | null
   skt_session_cnt: number
   log_print_cnt: number
   tot_energy_consume: number | null
@@ -989,11 +993,39 @@ export default function App() {
                         <h3 className="mb-3 text-sm font-semibold text-slate-800">Associated Users</h3>
                         <div className="grid gap-2 sm:grid-cols-2">
                           {associatedUsers.map((user) => (
-                            <div key={user._id} className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3">
-                              <span className="text-sm font-medium text-slate-900">{user.username}</span>
-                              <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
-                                {user.user_role}
-                              </span>
+                            <div key={user._id} className="rounded-lg border border-slate-200 bg-white p-3">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-sm font-medium text-slate-900">{user.username}</span>
+                                <span className="rounded-full bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700">
+                                  {user.user_role}
+                                </span>
+                              </div>
+                              <div className="grid grid-cols-2 gap-2 text-[11px] text-slate-600">
+                                <div className="flex flex-col">
+                                  <span className="text-slate-400 uppercase text-[10px]">Email Verified</span>
+                                  <span className={user.is_email_verified ? "text-emerald-600 font-medium" : "text-slate-600"}>
+                                    {user.is_email_verified ? 'Yes' : 'No'}
+                                  </span>
+                                </div>
+                                <div className="flex flex-col">
+                                  <span className="text-slate-400 uppercase text-[10px]">Mobile Verified</span>
+                                  <span className={user.is_mobile_verified ? "text-emerald-600 font-medium" : "text-slate-600"}>
+                                    {user.is_mobile_verified ? 'Yes' : 'No'}
+                                  </span>
+                                </div>
+                                {user.gender && (
+                                  <div className="flex flex-col">
+                                    <span className="text-slate-400 uppercase text-[10px]">Gender</span>
+                                    <span>{user.gender}</span>
+                                  </div>
+                                )}
+                                {user.dob && (
+                                  <div className="flex flex-col">
+                                    <span className="text-slate-400 uppercase text-[10px]">DOB</span>
+                                    <span>{user.dob}</span>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           ))}
                         </div>
