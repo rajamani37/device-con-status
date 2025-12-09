@@ -16,7 +16,18 @@ import { AlertCircle, Loader2, ChevronLeft, ChevronRight, X, Info } from 'lucide
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, Filler)
 
-const API_BASE = 'https://ftp.iinvsys.com:55576/core1/spl'
+const ENV_CONFIG = {
+  staging: {
+    label: 'Staging',
+    url: 'https://ftp.iinvsys.com:55576/core1/spl',
+  },
+  production: {
+    label: 'Production Innomate',
+    url: 'https://innomate.iinvsys.com/core',
+  },
+} as const
+
+type EnvType = keyof typeof ENV_CONFIG
 
 // API Response types
 type SerialSearchResponse = {
@@ -316,6 +327,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [durationUnit, setDurationUnit] = useState<'seconds' | 'minutes' | 'hours'>('minutes')
   const [timezone, setTimezone] = useState<TimezoneValue>('UTC')
+  const [env, setEnv] = useState<EnvType>('staging')
   
   // Device details modal state
   const [showDeviceModal, setShowDeviceModal] = useState(false)
@@ -361,7 +373,7 @@ export default function App() {
       setError(null)
       try {
         const searchParam = searchDebounced || 'SPL'
-        const url = `${API_BASE}/devices/search_serialno?search=${encodeURIComponent(searchParam)}&page=${serialPage}&limit=20`
+        const url = `${ENV_CONFIG[env].url}/devices/search_serialno?search=${encodeURIComponent(searchParam)}&page=${serialPage}&limit=20`
         const res = await fetch(url)
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const data: SerialSearchResponse = await res.json()
@@ -381,7 +393,7 @@ export default function App() {
       }
     }
     fetchSerials()
-  }, [searchDebounced, serialPage])
+  }, [searchDebounced, serialPage, env])
 
   // Fetch connection data when device or range changes
   useEffect(() => {
@@ -394,7 +406,7 @@ export default function App() {
       setRecordsLoading(true)
       try {
         const { fromEpoch, toEpoch } = getEpochRange(range, dateFrom, dateTo)
-        const res = await fetch(`${API_BASE}/device_Maintainance/get_deviceConnection_data`, {
+        const res = await fetch(`${ENV_CONFIG[env].url}/device_Maintainance/get_deviceConnection_data`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -427,7 +439,7 @@ export default function App() {
       }
     }
     fetchConnectionData()
-  }, [selectedDeviceId, selectedSerial, range, dateFrom, dateTo])
+  }, [selectedDeviceId, selectedSerial, range, dateFrom, dateTo, env])
 
   // Handle serial selection
   const handleSelectSerial = (serial: string, deviceId: string) => {
@@ -443,7 +455,7 @@ export default function App() {
     setAssociatedUsers([])
     
     try {
-      const res = await fetch(`${API_BASE}/devices/deviceinfo?serial_no=${encodeURIComponent(serialNo)}`)
+      const res = await fetch(`${ENV_CONFIG[env].url}/devices/deviceinfo?serial_no=${encodeURIComponent(serialNo)}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data: DeviceInfoResponse = await res.json()
       setDeviceDetails(data.device_details)
@@ -550,7 +562,23 @@ export default function App() {
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-10">
         <header className="flex flex-col gap-2">
-          <p className="text-sm font-medium text-blue-600">Connection Dashboard</p>
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-medium text-blue-600">Connection Dashboard</p>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-slate-500">Environment:</span>
+              <select
+                value={env}
+                onChange={(e) => setEnv(e.target.value as EnvType)}
+                className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-400"
+              >
+                {Object.entries(ENV_CONFIG).map(([key, config]) => (
+                  <option key={key} value={key}>
+                    {config.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
           <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
             Device connectivity by serial number
           </h1>
