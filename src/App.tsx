@@ -161,6 +161,53 @@ const TIMEZONE_OPTIONS = [
 ] as const
 type TimezoneValue = (typeof TIMEZONE_OPTIONS)[number]['value']
 
+const LOG_PAGE_SIZE = 20
+const LOGS_BASE_URL = 'http://localhost:3030'
+const LOGS_INDEX = 'innomate-uae'
+const LOG_QUERY_OPTIONS = [
+  {
+    value: 'relay-27-panelsession',
+    label: 'Relay 27 panel session',
+    template: 'container.name : "device-svr" AND message: ("r 1 SERIAL_PLACEHOLDER 27" AND "27")',
+  },
+  {
+    value: 'relay-18-status',
+    label: 'Relay 18 status',
+    template: 'container.name : "device-svr" AND message: "r 1 SERIAL_PLACEHOLDER 18"',
+  },
+] as const
+type LogQueryValue = (typeof LOG_QUERY_OPTIONS)[number]['value']
+
+type LogEntry = {
+  id: string
+  timestamp?: string | null
+  message: string
+  rlsSts: boolean | null
+  relayStartTime?: number | null
+  relayDuration?: number | null
+}
+
+function extractRlsSts(message: string): boolean | null {
+  const match = message.match(/"rls_sts"\s*:\s*(true|false)/i)
+  if (match) return match[1].toLowerCase() === 'true'
+  return null
+}
+
+function extractRelayMeta(message: string): { relayStartTime: number | null; relayDuration: number | null } {
+  const startMatch = message.match(/"relay_start_time"\s*:\s*(\d+)/i)
+  const durationMatch = message.match(/"duration"\s*:\s*(\d+)/i)
+  return {
+    relayStartTime: startMatch ? Number(startMatch[1]) : null,
+    relayDuration: durationMatch ? Number(durationMatch[1]) : null,
+  }
+}
+
+function cleanLogMessage(message: string): string {
+  // Drop leading timestamp and tags like "[09.12.2025 ...] [LOG]   "
+  const trimmed = message.replace(/^\[[^\]]+\]\s*\[LOG\]\s*/i, '').trim()
+  return trimmed.length > 0 ? trimmed : message
+}
+
 // Helper to calculate epoch range based on selected time range
 function getEpochRange(range: RangeValue, dateFrom: string, dateTo: string): { fromEpoch: number; toEpoch: number } {
   const now = new Date()
@@ -328,6 +375,14 @@ export default function App() {
   const [durationUnit, setDurationUnit] = useState<'seconds' | 'minutes' | 'hours'>('minutes')
   const [timezone, setTimezone] = useState<TimezoneValue>('UTC')
   const [env, setEnv] = useState<EnvType>('staging')
+
+  // Logs state
+  const [logs, setLogs] = useState<LogEntry[]>([])
+  const [logPage, setLogPage] = useState(1)
+  const [logsLoading, setLogsLoading] = useState(false)
+  const [logsError, setLogsError] = useState<string | null>(null)
+  const [logHasMore, setLogHasMore] = useState(false)
+  const [logQueryValue, setLogQueryValue] = useState<LogQueryValue>(LOG_QUERY_OPTIONS[0].value)
   
   // Device details modal state
   const [showDeviceModal, setShowDeviceModal] = useState(false)
@@ -356,6 +411,27 @@ export default function App() {
     },
     [dateFormatter],
   )
+
+  const formatEpochInTimezone = useCallback(
+    (epochSeconds?: number | null) => {
+      if (!epochSeconds) return '—'
+      return formatInTimezone(new Date(epochSeconds * 1000))
+    },
+    [formatInTimezone],
+  )
+
+  const formatDurationSeconds = useCallback((seconds?: number | null) => {
+    if (seconds === null || seconds === undefined) return '—'
+    if (seconds < 60) return `${seconds}s`
+    const hrs = Math.floor(seconds / 3600)
+    const mins = Math.floor((seconds % 3600) / 60)
+    const secs = Math.floor(seconds % 60)
+    const parts = []
+    if (hrs) parts.push(`${hrs}h`)
+    if (mins) parts.push(`${mins}m`)
+    if (secs || parts.length === 0) parts.push(`${secs}s`)
+    return parts.join(' ')
+  }, [])
 
   // Debounce search input
   useEffect(() => {
@@ -445,7 +521,70 @@ export default function App() {
   const handleSelectSerial = (serial: string, deviceId: string) => {
     setSelectedSerial(serial)
     setSelectedDeviceId(deviceId)
+    setLogPage(1)
   }
+
+  // Fetch logs for selected serial
+  useEffect(() => {
+    const fetchLogs = async () => {
+      if (!selectedSerial) {
+        setLogs([])
+        setLogHasMore(false)
+        return
+      }
+
+      setLogsLoading(true)
+      setLogsError(null)
+      try {
+        const selectedQuery = LOG_QUERY_OPTIONS.find((opt) => opt.value === logQueryValue) ?? LOG_QUERY_OPTIONS[0]
+        const query = selectedQuery.template.replace('SERIAL_PLACEHOLDER', selectedSerial)
+        const offset = (logPage - 1) * LOG_PAGE_SIZE
+        const url = `${LOGS_BASE_URL}/logs/search?index=${encodeURIComponent(
+          LOGS_INDEX,
+        )}&query=${encodeURIComponent(query)}&offset=${offset}&limit=${LOG_PAGE_SIZE}&start_time=2025-08-10T00:00:00.000Z&end_time=2026-08-18T23:59:59.999Z`
+        const res = await fetch(url)
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const data: any[] = await res.json()
+        const parsed: LogEntry[] = data.map((item) => {
+          const msg = item?._source?.message || item?.message || ''
+          const relayMeta = extractRelayMeta(msg)
+          return {
+            id: item?._id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            timestamp: item?._source?.['@timestamp'] || null,
+            message: cleanLogMessage(msg),
+            rlsSts: extractRlsSts(msg),
+            relayStartTime: relayMeta.relayStartTime,
+            relayDuration: relayMeta.relayDuration,
+          }
+        })
+        setLogs(parsed)
+        setLogHasMore(parsed.length === LOG_PAGE_SIZE)
+      } catch (err) {
+        console.error('Failed to fetch logs:', err)
+        setLogs([])
+        setLogHasMore(false)
+        setLogsError(err instanceof Error ? err.message : 'Failed to fetch logs')
+      } finally {
+        setLogsLoading(false)
+      }
+    }
+    fetchLogs()
+  }, [selectedSerial, logPage, logQueryValue])
+
+  // Reset log page when query selection changes
+  useEffect(() => {
+    setLogPage(1)
+  }, [logQueryValue])
+
+  const logCounts = useMemo(() => {
+    let trueCount = 0
+    let falseCount = 0
+    logs.forEach((l) => {
+      if (l.rlsSts === true) trueCount += 1
+      else if (l.rlsSts === false) falseCount += 1
+    })
+    return { trueCount, falseCount }
+  }, [logs])
 
   // Fetch device details for modal
   const fetchDeviceDetails = async (serialNo: string) => {
@@ -855,6 +994,115 @@ export default function App() {
                         {selectedSerial ? 'No data for selected range.' : 'Select a serial to view data.'}
                       </div>
                     )}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold text-slate-800">Device logs</p>
+                      <p className="text-xs text-slate-500">
+                        Messages for <span className="font-semibold text-slate-700">{selectedSerial || '—'}</span>
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3 text-xs">
+                      <label className="flex items-center gap-2">
+                        <span className="text-slate-600">Query</span>
+                        <select
+                          value={logQueryValue}
+                          onChange={(e) => setLogQueryValue(e.target.value as LogQueryValue)}
+                          className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-400"
+                        >
+                          {LOG_QUERY_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <span className="rounded-full bg-emerald-50 px-3 py-1 font-medium text-emerald-700">
+                        rls_sts true: {logCounts.trueCount}
+                      </span>
+                      <span className="rounded-full bg-rose-50 px-3 py-1 font-medium text-rose-700">
+                        rls_sts false: {logCounts.falseCount}
+                      </span>
+                    </div>
+                  </div>
+
+                  {logsError && (
+                    <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                      {logsError}
+                    </div>
+                  )}
+
+                  <div className="mt-3 h-[280px] rounded-lg border border-slate-100 bg-slate-50/60">
+                    {logsLoading ? (
+                      <div className="flex h-full items-center justify-center">
+                        <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
+                      </div>
+                    ) : logs.length === 0 ? (
+                      <div className="flex h-full items-center justify-center text-sm text-slate-500">
+                        {selectedSerial ? 'No logs found for this serial.' : 'Select a serial to view logs.'}
+                      </div>
+                    ) : (
+                      <div className="h-full overflow-y-auto">
+                        <ul className="divide-y divide-slate-200 text-sm text-slate-800">
+                          {logs.map((log) => (
+                            <li key={log.id} className="px-3 py-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-mono text-[11px] text-slate-500">
+                                  {log.timestamp ? formatInTimezone(new Date(log.timestamp)) : '—'}
+                                </span>
+                                {log.rlsSts !== null && (
+                                  <span
+                                    className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                                      log.rlsSts
+                                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                                        : 'bg-rose-50 text-rose-700 border border-rose-100'
+                                    }`}
+                                  >
+                                    rls_sts: {log.rlsSts ? 'true' : 'false'}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="mt-1 whitespace-pre-wrap text-slate-800">{log.message}</p>
+                              {(log.relayStartTime || log.relayDuration) && (
+                                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                                  {log.relayStartTime && (
+                                    <span className="rounded-full border border-blue-100 bg-blue-50 px-2 py-0.5 font-semibold text-blue-700">
+                                      Start: {formatEpochInTimezone(log.relayStartTime)}
+                                    </span>
+                                  )}
+                                  {log.relayDuration !== null && log.relayDuration !== undefined && (
+                                    <span className="rounded-full border border-amber-100 bg-amber-50 px-2 py-0.5 font-semibold text-amber-700">
+                                      Duration: {formatDurationSeconds(log.relayDuration)}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-3 flex items-center justify-between">
+                    <button
+                      onClick={() => setLogPage((p) => Math.max(1, p - 1))}
+                      disabled={logPage <= 1 || logsLoading}
+                      className="flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <ChevronLeft className="h-3 w-3" /> Prev
+                    </button>
+                    <span className="text-xs text-slate-500">Page {logPage}</span>
+                    <button
+                      onClick={() => setLogPage((p) => p + 1)}
+                      disabled={!logHasMore || logsLoading}
+                      className="flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Next <ChevronRight className="h-3 w-3" />
+                    </button>
                   </div>
                 </div>
 
