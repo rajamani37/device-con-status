@@ -12,7 +12,7 @@ import {
   Legend,
   Filler,
 } from 'chart.js'
-import { AlertCircle, Loader2, ChevronLeft, ChevronRight, X, Info } from 'lucide-react'
+import { AlertCircle, Loader2, ChevronLeft, ChevronRight, X, Info, Maximize2, Minimize2 } from 'lucide-react'
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, Title, Tooltip, Legend, Filler)
 
@@ -23,7 +23,7 @@ const ENV_CONFIG = {
   },
   production: {
     label: 'Production Innomate',
-    url: 'https://innomate.iinvsys.com/core',
+    url: 'https://innomate.iinvsys.com/core/spl',
   },
 } as const
 
@@ -163,7 +163,12 @@ type TimezoneValue = (typeof TIMEZONE_OPTIONS)[number]['value']
 
 const LOG_PAGE_SIZE = 20
 const LOGS_BASE_URL = 'http://localhost:3030'
-const LOGS_INDEX = 'innomate-uae'
+const LOG_INDEX_OPTIONS = [
+  { value: 'innomate-india', label: 'India' },
+  { value: 'innomate-uae', label: 'UAE' },
+] as const
+type LogIndexValue = (typeof LOG_INDEX_OPTIONS)[number]['value']
+
 const LOG_QUERY_OPTIONS = [
   {
     value: 'relay-27-panelsession',
@@ -383,6 +388,8 @@ export default function App() {
   const [logsError, setLogsError] = useState<string | null>(null)
   const [logHasMore, setLogHasMore] = useState(false)
   const [logQueryValue, setLogQueryValue] = useState<LogQueryValue>(LOG_QUERY_OPTIONS[0].value)
+  const [logIndex, setLogIndex] = useState<LogIndexValue>(LOG_INDEX_OPTIONS[0].value)
+  const [isLogExpanded, setIsLogExpanded] = useState(false)
   
   // Device details modal state
   const [showDeviceModal, setShowDeviceModal] = useState(false)
@@ -537,10 +544,12 @@ export default function App() {
       setLogsError(null)
       try {
         const selectedQuery = LOG_QUERY_OPTIONS.find((opt) => opt.value === logQueryValue) ?? LOG_QUERY_OPTIONS[0]
+        // SPL3001X02000023 SPL1601X02100002
         const query = selectedQuery.template.replace('SERIAL_PLACEHOLDER', selectedSerial)
+        // const query = selectedQuery.template.replace('SERIAL_PLACEHOLDER', 'SPL1601X02100002')
         const offset = (logPage - 1) * LOG_PAGE_SIZE
         const url = `${LOGS_BASE_URL}/logs/search?index=${encodeURIComponent(
-          LOGS_INDEX,
+          logIndex,
         )}&query=${encodeURIComponent(query)}&offset=${offset}&limit=${LOG_PAGE_SIZE}&start_time=2025-08-10T00:00:00.000Z&end_time=2026-08-18T23:59:59.999Z`
         const res = await fetch(url)
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -569,12 +578,12 @@ export default function App() {
       }
     }
     fetchLogs()
-  }, [selectedSerial, logPage, logQueryValue])
+  }, [selectedSerial, logPage, logQueryValue, logIndex])
 
   // Reset log page when query selection changes
   useEffect(() => {
     setLogPage(1)
-  }, [logQueryValue])
+  }, [logQueryValue, logIndex])
 
   const logCounts = useMemo(() => {
     let trueCount = 0
@@ -997,7 +1006,13 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+                <div
+                  className={`transition-all duration-200 ease-in-out ${
+                    isLogExpanded
+                      ? 'fixed inset-0 z-50 flex flex-col bg-white p-6'
+                      : 'rounded-xl border border-slate-200 bg-white p-4 shadow-sm'
+                  }`}
+                >
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="space-y-1">
                       <p className="text-sm font-semibold text-slate-800">Device logs</p>
@@ -1006,6 +1021,20 @@ export default function App() {
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-3 text-xs">
+                      <label className="flex items-center gap-2">
+                        <span className="text-slate-600">Index</span>
+                        <select
+                          value={logIndex}
+                          onChange={(e) => setLogIndex(e.target.value as LogIndexValue)}
+                          className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-400"
+                        >
+                          {LOG_INDEX_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
                       <label className="flex items-center gap-2">
                         <span className="text-slate-600">Query</span>
                         <select
@@ -1020,12 +1049,14 @@ export default function App() {
                           ))}
                         </select>
                       </label>
-                      <span className="rounded-full bg-emerald-50 px-3 py-1 font-medium text-emerald-700">
-                        rls_sts true: {logCounts.trueCount}
-                      </span>
-                      <span className="rounded-full bg-rose-50 px-3 py-1 font-medium text-rose-700">
-                        rls_sts false: {logCounts.falseCount}
-                      </span>
+                      <div className="ml-2 h-4 w-px bg-slate-200"></div>
+                      <button
+                        onClick={() => setIsLogExpanded(!isLogExpanded)}
+                        className="flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 hover:text-blue-600"
+                        title={isLogExpanded ? 'Exit full screen' : 'Full screen'}
+                      >
+                        {isLogExpanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+                      </button>
                     </div>
                   </div>
 
@@ -1035,7 +1066,11 @@ export default function App() {
                     </div>
                   )}
 
-                  <div className="mt-3 h-[280px] rounded-lg border border-slate-100 bg-slate-50/60">
+                  <div
+                    className={`mt-3 rounded-lg border border-slate-100 bg-slate-50/60 ${
+                      isLogExpanded ? 'flex-1 min-h-0' : 'h-[280px]'
+                    }`}
+                  >
                     {logsLoading ? (
                       <div className="flex h-full items-center justify-center">
                         <Loader2 className="h-6 w-6 animate-spin text-blue-600" />
@@ -1065,7 +1100,7 @@ export default function App() {
                                   </span>
                                 )}
                               </div>
-                              <p className="mt-1 whitespace-pre-wrap text-slate-800">{log.message}</p>
+                              <p className="mt-1 whitespace-pre-wrap break-all text-slate-800">{log.message}</p>
                               {(log.relayStartTime || log.relayDuration) && (
                                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
                                   {log.relayStartTime && (
