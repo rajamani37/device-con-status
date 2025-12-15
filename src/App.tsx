@@ -585,15 +585,15 @@ export default function App() {
     setLogPage(1)
   }, [logQueryValue, logIndex])
 
-  const logCounts = useMemo(() => {
-    let trueCount = 0
-    let falseCount = 0
-    logs.forEach((l) => {
-      if (l.rlsSts === true) trueCount += 1
-      else if (l.rlsSts === false) falseCount += 1
-    })
-    return { trueCount, falseCount }
-  }, [logs])
+  // const logCounts = useMemo(() => {
+  //   let trueCount = 0
+  //   let falseCount = 0
+  //   logs.forEach((l) => {
+  //     if (l.rlsSts === true) trueCount += 1
+  //     else if (l.rlsSts === false) falseCount += 1
+  //   })
+  //   return { trueCount, falseCount }
+  // }, [logs])
 
   // Fetch device details for modal
   const fetchDeviceDetails = async (serialNo: string) => {
